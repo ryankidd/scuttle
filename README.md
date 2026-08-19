@@ -47,6 +47,43 @@ Two implementations satisfy them:
 Both return `fs.ErrNotExist` for a missing file, so callers test for it the
 same way regardless of which implementation they hold.
 
+## Fault Injection
+
+`FaultFS` wraps any `FS` and injects faults into the operations that pass
+through it. Every fault-eligible operation — `Open`, `Create`, `Remove`,
+`Rename` on the `FS`, and `Write` and `Sync` on an open file — consults a
+single seeded pseudo-random stream: with the configured probability the
+operation fails with `ErrInjected` instead of reaching the underlying `FS`,
+and otherwise it is forwarded untouched.
+
+Because every decision is drawn from one `rand.Rand` seeded at construction,
+replaying a workload with the same seed injects exactly the same faults at
+exactly the same points. A test that reproduces a failure need only record the
+seed; a bug found on a CI runner replays bit-for-bit on a laptop.
+
+```go
+fs := scuttle.NewFaultFS(scuttle.NewMemFS(), seed, 0.3)
+```
+
+`NewFaultFS(fs, seed, prob)` takes the underlying `FS`, an `int64` seed, and
+a fault probability in `[0, 1]`. Two `FaultFS` values built with the same seed
+and driven through the same sequence of operations inject an identical
+sequence of faults. The `Faults()` method returns a copy of the injected
+faults as `[]Fault`, each recording the ordinal, operation, and file name, so
+a test can assert replay fidelity:
+
+```go
+first  := runWorkload(seed, 0.3)
+second := runWorkload(seed, 0.3)
+if !reflect.DeepEqual(first, second) {
+    t.Fatal("same seed produced different faults")
+}
+```
+
+A `FaultFS` is safe for concurrent use, but deterministic replay assumes a
+deterministic sequence of operations — a workload that issues operations from
+several goroutines gives up the ordering guarantee.
+
 ## Usage
 
 Write code against the interface and pick the implementation at the edge:
@@ -98,8 +135,10 @@ go test ./...
 The suite runs every test against both implementations through the shared
 interface, so the two behave identically on the operations that matter:
 write-sync-reopen-read round-trips, appending writes, atomic rename, removal,
-and missing-file errors. Run it under the race detector with `go test -race
-./...`.
+and missing-file errors. The fault-injection tests verify that the same seed
+replays the same sequence of faults, that different seeds diverge, and that
+the extremes of probability (0 and 1) behave correctly. Run it under the race
+detector with `go test -race ./...`.
 
 ## Requirements
 
